@@ -84,4 +84,3 @@ Always restart **all** services after a build: the UI embeds hashed asset names 
 ## Open items
 
 - Stale ONT association state (client record persisting after disconnect) — separate investigation, not started.
-- Production had an odd untracked file named like `-lh --time-style=long-iso \` in its checkout (harmless since the build-metadata fix; may be worth removing).
