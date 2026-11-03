@@ -2,10 +2,10 @@ import path from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
-import { exec } from "node:child_process";
 import * as esbuild from "esbuild";
 import { optimize } from "svgo";
 import * as xmlParser from "../lib/xml-parser.ts";
+import { getBuildMetadata } from "./build-metadata.ts";
 
 const fsAsync = {
   readdir: promisify(fs.readdir),
@@ -20,8 +20,6 @@ const fsAsync = {
   unlink: promisify(fs.unlink),
   mkdir: promisify(fs.mkdir),
 };
-
-const execAsync = promisify(exec);
 
 const MODE = process.env["NODE_ENV"] || "production";
 
@@ -136,24 +134,6 @@ function generateSymbol(id: string, svgStr: string): string {
     .map((c) => xmlTostring(c))
     .join("");
   return `<symbol id="icon-${id}" ${viewBox}>${symbolBody}</symbol>`;
-}
-
-async function getBuildMetadata(): Promise<string> {
-  const date = new Date().toISOString().slice(2, 10).replaceAll("-", "");
-
-  const [commit, diff, newFiles] = await Promise.all([
-    execAsync("git rev-parse HEAD"),
-    execAsync("git diff HEAD"),
-    execAsync("git ls-files --others --exclude-standard"),
-  ]).then((res) => res.map((r) => r.stdout.trim()));
-
-  if (!diff && !newFiles) return date + commit.slice(0, 4);
-
-  const hash = createHash("md5");
-  hash.update(commit).update(diff).update(newFiles);
-  for (const file of newFiles.split("\n").filter((f) => f))
-    hash.update(await fsAsync.readFile(file));
-  return date + hash.digest("hex").slice(0, 4);
 }
 
 async function init(): Promise<void> {
@@ -356,4 +336,5 @@ init()
   )
   .catch((err) => {
     process.stderr.write(err.stack + "\n");
+    process.exitCode = 1;
   });
