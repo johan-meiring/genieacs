@@ -69,6 +69,37 @@ export async function listener(
   return handler(request, response, url, body);
 }
 
+// Used by ?connection_request&async: the client has already been answered, so
+// the outcome of the connection request only goes to the access log.
+function sendConnectionRequestInBackground(
+  deviceId: string,
+  device: Parameters<typeof apiFunctions.connectionRequest>[1],
+): void {
+  apiFunctions
+    .connectionRequest(deviceId, device)
+    .then((status) => {
+      if (status) {
+        logger.accessWarn({
+          message: "Background connection request failed",
+          deviceId: deviceId,
+          status: status,
+        });
+      } else {
+        logger.accessInfo({
+          message: "Background connection request sent",
+          deviceId: deviceId,
+        });
+      }
+    })
+    .catch((err) => {
+      logger.accessWarn({
+        message: "Background connection request failed",
+        deviceId: deviceId,
+        status: err.message,
+      });
+    });
+}
+
 async function handler(
   request: IncomingMessage,
   response: ServerResponse,
@@ -262,6 +293,9 @@ async function handler(
       );
 
       const conReq = url.searchParams.has("connection_request");
+      // With ?async, reply as soon as the task is queued and send the
+      // connection request in the background instead of awaiting the session.
+      const asyncConReq = conReq && url.searchParams.has("async");
       let task;
       if (body.length) {
         try {
@@ -292,6 +326,10 @@ async function handler(
           await apiFunctions.insertTasks(task);
           response.writeHead(202, { "Content-Type": "application/json" });
           response.end(JSON.stringify(task));
+        } else if (asyncConReq) {
+          response.writeHead(202, "Connection request sent in background");
+          response.end();
+          sendConnectionRequestInBackground(deviceId, flattenDevice(dev));
         } else {
           const status = await apiFunctions.connectionRequest(
             deviceId,
@@ -348,6 +386,19 @@ async function handler(
 
       const lastInform = (dev["_lastInform"] as Date).getTime();
       const device = flattenDevice(dev);
+
+      if (asyncConReq) {
+        // Restore socket timeout
+        if (socketTimeout) request.socket.setTimeout(socketTimeout);
+        response.writeHead(
+          202,
+          "Task queued, connection request sent in background",
+          { "Content-Type": "application/json" },
+        );
+        response.end(JSON.stringify(task));
+        sendConnectionRequestInBackground(deviceId, device);
+        return;
+      }
 
       let onlineThreshold: number;
       if (url.searchParams.has("timeout")) {

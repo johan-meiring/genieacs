@@ -45,6 +45,7 @@ npx prettier --check <changed files>
 | Inject GPN objects the device never reports (e.g. `AssociatedDevice.` on Calix-family ONTs) and probe them with object-level GPV | `cwmp.forceAddManufacturers` **and** `cwmp.forceAddObjects` (both required; `*` = existing numeric instance; no defaults) | `session.ts`: `getForceAddConfig`, `getForcedObjectPatterns`, `matchesForceAddManufacturer`, `forcedObjectProbePaths`, `ForcedObjectProbe` |
 | Force recursive GPN (`NextLevel=false`) for matching paths | `cwmp.forceNextLevelFalse` (nothing forced if unset) | `session.ts`: `forceRecursiveGpn` in GPN scheduler |
 | Malformed Inform DeviceId handling | `cwmp.invalidDeviceIdRecovery` = `disabled` (default) / `log` / `reset` | `cwmp.ts`, `soap.ts` |
+| Non-blocking NBI connection request: `POST /devices/{id}/tasks?connection_request&async` (with a task body or empty) replies 202 at once and sends the connection request in the background instead of waiting for the session | Query flag `async` (opt-in; without it the NBI waits as before) | `nbi.ts`: `sendConnectionRequestInBackground`, `asyncConReq` |
 
 ### Logging (all via the **access logger**, `logger.accessInfo/accessWarn` with `sessionContext`)
 
@@ -53,8 +54,10 @@ npx prettier --check <changed files>
 | Configured NextLevel override | `Forced GPN NextLevel=false` (+ `parameterPath`) | INFO |
 | Object actually injected | `Forced GPN object added` (+ `objectPath`, `parameterPath`) | INFO |
 | Incomplete DeviceId (`log`/`reset` modes) | `CWMP Inform has incomplete DeviceId` | WARN |
+| NBI `async` connection request succeeded (NBI access log, `deviceId`) | `Background connection request sent` | INFO |
+| NBI `async` connection request failed (NBI access log, `deviceId`, `status`) | `Background connection request failed` | WARN |
 
-Destination: `GENIEACS_CWMP_ACCESS_LOG_FILE=/var/log/genieacs/genieacs-cwmp-access.log` (production sets this). `logger.info` goes to `GENIEACS_CWMP_LOG_FILE` or, if unset, stderr → journald.
+Destination: `GENIEACS_CWMP_ACCESS_LOG_FILE=/var/log/genieacs/genieacs-cwmp-access.log` (production sets this); the two NBI events go to `GENIEACS_NBI_ACCESS_LOG_FILE` (stdout if unset). `logger.info` goes to `GENIEACS_CWMP_LOG_FILE` or, if unset, stderr → journald.
 
 Optional: `GENIEACS_CWMP_LOG_FILE=/var/log/genieacs/genieacs-cwmp.log` keeps application messages in a file instead of the journal. Env changes need a restart, not a rebuild.
 

@@ -63,6 +63,17 @@ not a replacement for code inspection.
    from trusted forwarded headers; avoid trusting arbitrary client-supplied
    headers. Treat reset as destructive; test log mode first.
 
+4. **Non-blocking NBI connection request** (`lib/nbi.ts`).
+   `POST /devices/{id}/tasks?connection_request` normally waits for the CWMP
+   session to start and finish (up to the online threshold plus 120 s). Adding
+   the `async` query flag makes it reply `202` as soon as the task (if any) is
+   queued, then send the connection request in the background via
+   `sendConnectionRequestInBackground`. Works with any task body or an empty
+   body (wake-up only). The outcome only goes to the NBI access log:
+   `Background connection request sent` (INFO) or
+   `Background connection request failed` (WARN, with `status`). Without
+   `async` the endpoint behaves exactly as upstream.
+
 ## Completed changes
 
 `cwmp-updates` holds one commit per independent change on top of the
@@ -75,6 +86,7 @@ not a replacement for code inspection.
 | `feat(cwmp): configurable forced GPN NextLevel=false with access logging` | `cwmp.forceNextLevelFalse` and the `Forced GPN NextLevel=false` access-log event.                           |
 | `feat(cwmp): inject configured missing GPN objects with access logging`   | `cwmp.forceAddManufacturers`/`cwmp.forceAddObjects`, the GPV probe and the `Forced GPN object added` event. |
 | `feat(cwmp): configurable handling of incomplete Inform DeviceId`         | `cwmp.invalidDeviceIdRecovery` (`disabled`/`log`/`reset`) and its access-log events.                        |
+| `feat(nbi): add async option for connection_request task calls`           | `?connection_request&async` replies 202 at once; the connection request is sent in the background.          |
 
 The user confirmed that building and access logging work in production. No
 logging implementation task remains outstanding.
