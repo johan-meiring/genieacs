@@ -53,6 +53,17 @@ const VALID_PARAM_TYPES = new Set([
   "xsd:hexBinary",
 ]);
 
+function getForceAddConfig(sessionContext: SessionContext, key: string): string {
+  const value = localCache.getConfig(
+    sessionContext.cacheSnapshot,
+    key,
+    {},
+    sessionContext.timestamp,
+    (e) => configContextCallback(sessionContext, e),
+  );
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function initDeviceData(): DeviceData {
   return {
     paths: new PathSet(),
@@ -1646,7 +1657,32 @@ function generateGetRpcRequest(
         est = estimateGpnCount(patterns);
       }
 
-      if (est < Math.pow(2, Math.max(0, 8 - path.length))) {
+      // These patterns are configured under Admin > Config. No defaults.
+      // A * matches exactly one numeric instance of an existing object.
+      const configuredGpnPaths = getForceAddConfig(
+        sessionContext,
+        "cwmp.forceNextLevelFalse",
+      );
+      const gpnPathSegments = path.toString().split(".");
+      const forceRecursiveGpn = configuredGpnPaths
+        .split(/[,;\r\n]/)
+        .some((rawPattern) => {
+          const pattern = rawPattern.trim().replace(/\.$/, "");
+          if (!pattern) return false;
+          const segments = pattern.split(".");
+          return (
+            segments.length === gpnPathSegments.length &&
+            segments.every((segment, index) =>
+              segment === "*"
+                ? /^\d+$/.test(gpnPathSegments[index])
+                : segment === gpnPathSegments[index],
+            )
+          );
+        });
+      if (
+        !forceRecursiveGpn &&
+        est < Math.pow(2, Math.max(0, 8 - path.length))
+      ) {
         nextLevel = true;
         syncState.gpn.delete(path);
       } else {
@@ -1660,9 +1696,18 @@ function generateGetRpcRequest(
           syncState.gpn.delete(p);
       }
 
+      const parameterPath = path.length ? path.toString() + "." : "";
+      if (forceRecursiveGpn) {
+        logger.accessInfo({
+          sessionContext: sessionContext,
+          message: "Forced GPN NextLevel=false",
+          parameterPath: parameterPath,
+        });
+      }
+
       return {
         name: "GetParameterNames",
-        parameterPath: path.length ? path.toString() + "." : "",
+        parameterPath: parameterPath,
         nextLevel: nextLevel,
       };
     }
