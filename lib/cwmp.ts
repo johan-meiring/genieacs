@@ -58,6 +58,36 @@ const REALM = "GenieACS";
 const MAX_CYCLES = 4;
 const MAX_CONCURRENT_REQUESTS = +config.get("MAX_CONCURRENT_REQUESTS");
 
+// Read the malformed-Inform recovery mode from Admin > Config, even when
+// DeviceId is incomplete and no normal device session can be created.
+// No configured value (or an invalid value) means disabled. The environment
+// variable GENIEACS_INVALID_DEVICEID_RECOVERY is no longer consulted.
+async function getInvalidDeviceIdRecoveryMode(): Promise<
+  "disabled" | "log" | "reset"
+> {
+  const snapshot = await localCache.getRevision();
+  const configured = localCache.getConfig(
+    snapshot,
+    "cwmp.invalidDeviceIdRecovery",
+    {},
+    Date.now(),
+  );
+  if (configured == null || configured === "") return "disabled";
+  const mode = typeof configured === "string"
+    ? configured.trim().toLowerCase()
+    : "";
+  if (mode === "disabled" || mode === "log" || mode === "reset")
+    return mode;
+  logger.warn({
+    message: "Invalid cwmp.invalidDeviceIdRecovery setting; using disabled",
+    valueType: typeof configured,
+  });
+  return "disabled";
+}
+
+const INVALID_DEVICEID_PREFIX = "invalidid-";
+const INVALID_DEVICEID_TTL_SECONDS = 120;
+
 const MAX_SESSION_DURATION = 300000;
 const LOCK_REFRESH_INTERVAL = 10000;
 export const REQUEST_TIMEOUT = 10000;
@@ -1318,6 +1348,186 @@ function decodeString(buffer: Buffer, charset: string): string {
   return null;
 }
 
+// Keep malformed-DeviceId recovery out of the regular GenieACS device/DB
+// lifecycle. This cookie is opaque, one-time-use and valid across CWMP workers.
+type InvalidDeviceIdRecoveryState = {
+  stage: "inform" | "sent";
+  remoteAddress: string;
+  cwmpVersion: string;
+  expiresAt: number;
+  rpcId?: string;
+};
+
+function incompleteDeviceIdFields(deviceId: InformRequest["deviceId"]): string[] {
+  const fields: (keyof InformRequest["deviceId"])[] = [
+    "Manufacturer", "OUI", "ProductClass", "SerialNumber",
+  ];
+  return fields.filter(
+    (field) => typeof deviceId?.[field] !== "string" ||
+      !deviceId[field].trim(),
+  );
+}
+
+function invalidDeviceIdLogFields(
+  httpRequest: IncomingMessage,
+  deviceId: InformRequest["deviceId"],
+  missingFields: string[],
+): Record<string, unknown> {
+  // getRequestOrigin() respects GenieACS's trusted FORWARDED_HEADER setting.
+  return {
+    remoteAddress: getRequestOrigin(httpRequest).remoteAddress,
+    peerAddress: httpRequest.socket.remoteAddress,
+    missingFields: missingFields,
+    manufacturer: deviceId.Manufacturer?.slice(0, 128),
+    oui: deviceId.OUI?.slice(0, 128),
+    productClass: deviceId.ProductClass?.slice(0, 128),
+    serialNumber: deviceId.SerialNumber?.slice(0, 128),
+  };
+}
+
+function sendInvalidDeviceIdSoap(
+  httpResponse: ServerResponse,
+  res: { code: number; headers: Record<string, string>; data: string },
+): void {
+  httpResponse.setHeader("Content-Length", Buffer.byteLength(res.data));
+  httpResponse.writeHead(res.code, res.headers);
+  httpResponse.end(res.data);
+}
+
+async function startInvalidDeviceIdRecovery(
+  httpRequest: IncomingMessage,
+  httpResponse: ServerResponse,
+  rpc: SoapMessage,
+  body: string,
+  missingFields: string[],
+): Promise<void> {
+  const remoteAddress = getRequestOrigin(httpRequest).remoteAddress;
+  const deviceId = (rpc.cpeRequest as InformRequest).deviceId;
+  const fields = invalidDeviceIdLogFields(httpRequest, deviceId, missingFields);
+
+  // Keep the existing cwmp.auth evaluation: reset must not bypass an ACS's
+  // configured authentication policy. This temporary context is never saved.
+  const token = crypto.randomBytes(16).toString("hex");
+  const ctx = session.init(
+    `invalid-deviceid-${token}`,
+    rpc.cwmpVersion,
+    rpc.sessionTimeout,
+  );
+  ctx.cacheSnapshot = await localCache.getRevision();
+  ctx.httpRequest = httpRequest;
+  ctx.httpResponse = httpResponse;
+  await session.inform(ctx, rpc.cpeRequest as InformRequest);
+  if (!(await authenticate(ctx, body))) {
+    logger.accessWarn({
+      message: "Invalid DeviceId recovery: authentication not satisfied",
+      ...fields,
+    });
+    return responseUnauthorized(ctx, false);
+  }
+
+  const state: InvalidDeviceIdRecoveryState = {
+    stage: "inform",
+    remoteAddress: remoteAddress,
+    cwmpVersion: rpc.cwmpVersion,
+    expiresAt: Date.now() + INVALID_DEVICEID_TTL_SECONDS * 1000,
+  };
+  await cache.set(
+    `invalid_deviceid_${token}`,
+    JSON.stringify(state),
+    INVALID_DEVICEID_TTL_SECONDS,
+  );
+
+  const res = soap.response({
+    id: rpc.id,
+    acsResponse: { name: "InformResponse" },
+    cwmpVersion: rpc.cwmpVersion,
+  });
+  res.headers["Set-Cookie"] = `session=${INVALID_DEVICEID_PREFIX}${token}; Path=/; HttpOnly`;
+  logger.accessWarn({
+    message: "Invalid DeviceId recovery: Inform accepted for factory reset",
+    ...fields,
+  });
+  return sendInvalidDeviceIdSoap(httpResponse, res);
+}
+
+async function continueInvalidDeviceIdRecovery(
+  httpRequest: IncomingMessage,
+  httpResponse: ServerResponse,
+  sessionId: string,
+  rpc: SoapMessage,
+): Promise<void> {
+  const token = sessionId.slice(INVALID_DEVICEID_PREFIX.length);
+  if (!/^[0-9a-f]{32}$/.test(token)) {
+    httpResponse.writeHead(400, { Connection: "close" });
+    httpResponse.end("Invalid recovery session");
+    return;
+  }
+  // pop() makes the continuation single-use even across workers.
+  const saved = await cache.pop(`invalid_deviceid_${token}`);
+  if (!saved) {
+    httpResponse.writeHead(400, { Connection: "close" });
+    httpResponse.end("Expired recovery session");
+    return;
+  }
+  const state = JSON.parse(saved) as InvalidDeviceIdRecoveryState;
+  const remoteAddress = getRequestOrigin(httpRequest).remoteAddress;
+  if (state.remoteAddress !== remoteAddress || state.expiresAt < Date.now()) {
+    logger.accessWarn({
+      message: "Invalid DeviceId recovery: source changed or session expired",
+      remoteAddress: remoteAddress,
+      expectedRemoteAddress: state.remoteAddress,
+    });
+    httpResponse.writeHead(400, { Connection: "close" });
+    httpResponse.end("Invalid recovery session");
+    return;
+  }
+
+  if (state.stage === "inform") {
+    // A CPE sends an empty POST after InformResponse when ready for an ACS RPC.
+    if (rpc.cpeRequest || rpc.cpeResponse || rpc.cpeFault || rpc.unknownMethod) {
+      httpResponse.writeHead(400, { Connection: "close" });
+      httpResponse.end("Expected empty request before FactoryReset");
+      return;
+    }
+    const rpcId = crypto.randomBytes(8).toString("hex");
+    await cache.set(
+      `invalid_deviceid_${token}`,
+      JSON.stringify({ ...state, stage: "sent", rpcId }),
+      INVALID_DEVICEID_TTL_SECONDS,
+    );
+    const res = soap.response({
+      id: rpcId,
+      cwmpVersion: state.cwmpVersion,
+      acsRequest: { name: "FactoryReset" },
+    });
+    res.headers["Set-Cookie"] = `session=${sessionId}; Path=/; HttpOnly`;
+    logger.accessWarn({
+      message: "Invalid DeviceId recovery: FactoryReset sent",
+      remoteAddress: remoteAddress,
+    });
+    return sendInvalidDeviceIdSoap(httpResponse, res);
+  }
+
+  if (state.stage === "sent") {
+    if (rpc.id === state.rpcId && rpc.cpeResponse?.name === "FactoryResetResponse") {
+      logger.accessWarn({
+        message: "Invalid DeviceId recovery: FactoryResetResponse received",
+        remoteAddress: remoteAddress,
+      });
+    } else {
+      logger.accessWarn({
+        message: "Invalid DeviceId recovery: unexpected response after FactoryReset",
+        remoteAddress: remoteAddress,
+        responseName: rpc.cpeResponse?.name || rpc.cpeFault?.detail?.faultCode ||
+          rpc.unknownMethod || "empty",
+      });
+    }
+    return sendInvalidDeviceIdSoap(httpResponse, soap.response(null));
+  }
+  httpResponse.writeHead(400, { Connection: "close" });
+  httpResponse.end("Invalid recovery state");
+}
+
 async function listenerAsync(
   httpRequest: IncomingMessage,
   httpResponse: ServerResponse,
@@ -1492,6 +1702,57 @@ async function listenerAsync(
     );
   }
 
+  // Re-evaluate the GUI recovery mode at the start of each relevant request.
+  // This works even if Manufacturer/OUI/ProductClass/SerialNumber are missing.
+  const invalidDeviceIdRecovery =
+    sessionId?.startsWith(INVALID_DEVICEID_PREFIX) ||
+    rpc.cpeRequest?.name === "Inform"
+      ? await getInvalidDeviceIdRecoveryMode()
+      : "disabled";
+
+  // Intercept recovery sessions before the normal device-id/database flow.
+  if (sessionId?.startsWith(INVALID_DEVICEID_PREFIX)) {
+    if (invalidDeviceIdRecovery !== "reset") {
+      httpResponse.writeHead(400, { Connection: "close" });
+      httpResponse.end("DeviceId recovery disabled");
+      return;
+    }
+    return continueInvalidDeviceIdRecovery(httpRequest, httpResponse, sessionId, rpc);
+  }
+
+  if (rpc.cpeRequest?.name === "Inform") {
+    const informRequest = rpc.cpeRequest as InformRequest;
+    const deviceIdInfo = informRequest.deviceId;
+    const missingFields = incompleteDeviceIdFields(deviceIdInfo);
+    if (missingFields.length && invalidDeviceIdRecovery !== "disabled") {
+      logger.accessWarn({
+        message: "CWMP Inform has incomplete DeviceId",
+        recoveryMode: invalidDeviceIdRecovery,
+        ...invalidDeviceIdLogFields(httpRequest, deviceIdInfo, missingFields),
+      });
+    }
+    if (missingFields.length && invalidDeviceIdRecovery === "reset")
+      return startInvalidDeviceIdRecovery(
+        httpRequest, httpResponse, rpc, bodyStr, missingFields,
+      );
+
+    // Preserve unmodified GenieACS behaviour in disabled/log modes:
+    // a missing OUI or serial number is rejected before session creation.
+    if (!deviceIdInfo.OUI || !deviceIdInfo.SerialNumber) {
+      const msg = "Missing or invalid DeviceId element";
+      logger.accessError({
+        message: "XML parse error",
+        parseError: msg,
+        sessionContext: sessionContext || {
+          httpRequest: httpRequest,
+          httpResponse: httpResponse,
+        },
+      });
+      return clientError(
+        httpRequest, httpResponse, sessionContext, bodyStr, msg,
+      );
+    }
+  }
   if (!sessionContext && sessionId && rpc.cpeRequest?.name !== "Inform") {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const sessionContextString = await cache.pop(`session_${sessionId}`);

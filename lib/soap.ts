@@ -587,9 +587,6 @@ function Inform(xml: Element): InformRequest {
     }
   }
 
-  if (!deviceId || !deviceId.SerialNumber || !deviceId.OUI)
-    throw new Error("Missing or invalid DeviceId element");
-
   if (!parameterList) {
     warnings.push({
       message: "Missing or invalid XML node",
