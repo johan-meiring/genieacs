@@ -53,6 +53,18 @@ const VALID_PARAM_TYPES = new Set([
   "xsd:hexBinary",
 ]);
 
+
+
+// Some ONTs (seen on Calix-family units) never report the AssociatedDevice.
+// object in GetParameterNames responses. Configured objects are injected into
+// the response and then probed with an object-level GetParameterValues.
+type ForcedObjectProbe = GetParameterValues & {
+  forcedObjectProbe: true;
+};
+
+// GPN recovery is opt-in: both values must be set under Admin > Config.
+// Manufacturer names are case-insensitive. An object pattern '*' matches
+// one numeric instance; no configured path may invent a parent instance.
 function getForceAddConfig(sessionContext: SessionContext, key: string): string {
   const value = localCache.getConfig(
     sessionContext.cacheSnapshot,
@@ -64,6 +76,38 @@ function getForceAddConfig(sessionContext: SessionContext, key: string): string 
   return typeof value === "string" ? value.trim() : "";
 }
 
+function getForcedObjectPatterns(sessionContext: SessionContext): string[] {
+  const value = getForceAddConfig(sessionContext, "cwmp.forceAddObjects");
+  if (!value) return [];
+  return value.split(/[,;\r\n]/).map((s) => s.trim()).filter((s) => {
+    if (!s.endsWith(".")) return false;
+    const parts = s.slice(0, -1).split(".");
+    if (parts.length < 2 || !["InternetGatewayDevice", "Device"].includes(parts[0]))
+      return false;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(parts[parts.length - 1]))
+      return false;
+    return parts.every((p, i) => p === "*"
+      ? i > 0 && i < parts.length - 1
+      : /^\d+$/.test(p) || /^[A-Za-z_][A-Za-z0-9_]*$/.test(p));
+  });
+}
+
+function matchesForceAddManufacturer(sessionContext: SessionContext): boolean {
+  const configured = getForceAddConfig(
+    sessionContext, "cwmp.forceAddManufacturers",
+  );
+  if (!configured) return false;
+  const path = sessionContext.deviceData.paths.get(
+    Path.parse("DeviceID.Manufacturer"),
+  );
+  const attrs = path ? sessionContext.deviceData.attributes.get(path) : null;
+  const manufacturer = attrs?.value?.[1]?.[0];
+  if (typeof manufacturer !== "string" || !manufacturer.trim()) return false;
+  const name = manufacturer.trim().toLowerCase();
+  return configured.split(/[,;\r\n]/).some(
+    (candidate) => candidate.trim().toLowerCase() === name,
+  );
+}
 function initDeviceData(): DeviceData {
   return {
     paths: new PathSet(),
@@ -2576,9 +2620,17 @@ export async function rpcResponse(
       return invalidResponse("Response name does not match request name");
 
     const requested = new Set(rpcReq.parameterNames);
+    const isForcedObjectProbe =
+      (rpcReq as ForcedObjectProbe).forcedObjectProbe === true;
 
     for (const [path, value, type] of rpcRes.parameterList) {
-      if (!requested.delete(path.toString())) {
+      const name = path.toString();
+      const requestedLeaf = requested.delete(name);
+      // A GPV of an object may return all of its instance leaf values.
+      const probedObjectLeaf =
+        isForcedObjectProbe &&
+        rpcReq.parameterNames.some((prefix) => name.startsWith(prefix));
+      if (!requestedLeaf && !probedObjectLeaf) {
         logger.accessWarn({
           sessionContext: sessionContext,
           message: "Unexpected parameter in response",
@@ -2600,6 +2652,7 @@ export async function rpcResponse(
 
     if (requested.size) {
       for (const p of requested) {
+        if (isForcedObjectProbe) continue;
         logger.accessWarn({
           sessionContext: sessionContext,
           message: "Missing parameter in response",
@@ -2671,7 +2724,59 @@ export async function rpcResponse(
     if (rpcReq.parameterPath.endsWith("."))
       root = Path.parse(rpcReq.parameterPath.slice(0, -1));
     else root = Path.parse(rpcReq.parameterPath);
-
+    const forcedObjectProbePaths: string[] = [];
+    // Force configured missing object tables only for matching manufacturers.
+    // Expand '*' from existing parent paths; do not create unknown instances.
+    const objectPatterns = getForcedObjectPatterns(sessionContext);
+    if (objectPatterns.length && matchesForceAddManufacturer(sessionContext)) {
+      const reported = [
+        rpcReq.parameterPath,
+        ...rpcRes.parameterList.map(([p]) => p.toString()),
+      ];
+      const candidates = new Set<string>();
+      for (const pattern of objectPatterns) {
+        const segments = pattern.slice(0, -1).split(".");
+        const objectName = segments[segments.length - 1];
+        segments.pop();
+        for (const sourceName of reported) {
+          const sourceSegments = sourceName.replace(/\.$/, "").split(".");
+          if (sourceSegments.length < segments.length) continue;
+          if (!segments.every((segment, i) => segment === "*"
+            ? /^\d+$/.test(sourceSegments[i])
+            : segment === sourceSegments[i])) continue;
+          candidates.add(
+            sourceSegments.slice(0, segments.length).join(".") + "." + objectName + ".",
+          );
+        }
+      }
+      for (const objectPrefix of candidates) {
+        const objectName = objectPrefix.slice(0, -1);
+        const parentPrefix = objectPrefix.slice(0, objectName.lastIndexOf(".") + 1);
+        // Direct query of an empty object can still be probed with GPV.
+        if (rpcReq.parameterPath === objectPrefix) {
+          if (!rpcRes.parameterList.length)
+            forcedObjectProbePaths.push(objectPrefix);
+          continue;
+        }
+        if (rpcReq.nextLevel) {
+          if (rpcReq.parameterPath !== parentPrefix) continue;
+        } else if (!objectPrefix.startsWith(rpcReq.parameterPath)) {
+          continue;
+        }
+        if (rpcRes.parameterList.some(([p]) => {
+          const name = p.toString();
+          return name === objectName || name.startsWith(objectPrefix);
+        })) continue;
+        rpcRes.parameterList.push([Path.parse(objectName), true, false]);
+        logger.accessInfo({
+          sessionContext: sessionContext,
+          message: "Forced GPN object added",
+          objectPath: objectPrefix,
+          parameterPath: rpcReq.parameterPath,
+        });
+        forcedObjectProbePaths.push(objectPrefix);
+      }
+    }
     // Sort to help fill in missing params
     rpcRes.parameterList.sort((a, b) => {
       const pa = a[0];
@@ -2756,6 +2861,14 @@ export async function rpcResponse(
         null,
         toClear,
       );
+    }
+    // Queue targeted object-level GPV before normal declaration processing.
+    if (forcedObjectProbePaths.length) {
+      sessionContext.rpcRequest = {
+        name: "GetParameterValues",
+        parameterNames: forcedObjectProbePaths,
+        forcedObjectProbe: true,
+      } as ForcedObjectProbe;
     }
   } else if (rpcRes.name === "SetParameterValuesResponse") {
     if (rpcReq.name !== "SetParameterValues")
