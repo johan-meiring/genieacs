@@ -1315,6 +1315,11 @@ async function processRequest(
       sessionContext: sessionContext,
       message: "CPE fault",
       rpc: rpc,
+      ...(sessionContext.rpcRequest && {
+        acsRequest: JSON.stringify(
+          session.describeAcsRequest(sessionContext.rpcRequest, true),
+        ),
+      }),
     });
 
     const fault = await session.rpcFault(sessionContext, rpc.id, rpc.cpeFault);

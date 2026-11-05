@@ -3062,6 +3062,59 @@ export async function rpcResponse(
   return null;
 }
 
+const MAX_DESCRIBED_PARAMETERS = 100;
+const MAX_DESCRIBED_VALUE_LENGTH = 200;
+const SECRET_PARAMETER_NAME = /pass|secret|key|psk|token|credential/i;
+
+// Summary of the ACS request a CPE fault refers to, so the fault shows what
+// was sent (CPEs often leave SetParameterValuesFault empty). Download URLs
+// and credentials are never included; with maskSecrets, values of
+// secret-looking parameters are replaced by "***".
+export function describeAcsRequest(
+  rpcReq: AcsRequest,
+  maskSecrets: boolean,
+): Record<string, unknown> {
+  const desc: Record<string, unknown> = { name: rpcReq.name };
+  const limit = <T>(list: T[]): T[] => {
+    if (list.length > MAX_DESCRIBED_PARAMETERS)
+      desc.parameterCount = list.length;
+    return list.slice(0, MAX_DESCRIBED_PARAMETERS);
+  };
+
+  if (rpcReq.name === "SetParameterValues") {
+    desc.parameters = limit(rpcReq.parameterList).map(([name, v, type]) => {
+      let value = v;
+      if (maskSecrets && SECRET_PARAMETER_NAME.test(name)) value = "***";
+      else if (
+        typeof value === "string" &&
+        value.length > MAX_DESCRIBED_VALUE_LENGTH
+      )
+        value = value.slice(0, MAX_DESCRIBED_VALUE_LENGTH) + "…";
+      return { name, value, type };
+    });
+  } else if (rpcReq.name === "SetParameterAttributes") {
+    desc.parameters = limit(rpcReq.parameterList).map(
+      ([name, notification]) => ({ name, notification }),
+    );
+  } else if (
+    rpcReq.name === "GetParameterValues" ||
+    rpcReq.name === "GetParameterAttributes"
+  ) {
+    desc.parameterNames = limit(rpcReq.parameterNames);
+  } else if (rpcReq.name === "GetParameterNames") {
+    desc.parameterPath = rpcReq.parameterPath;
+    desc.nextLevel = rpcReq.nextLevel;
+  } else if (rpcReq.name === "AddObject" || rpcReq.name === "DeleteObject") {
+    desc.objectName = rpcReq.objectName;
+  } else if (rpcReq.name === "Download") {
+    desc.fileType = rpcReq.fileType;
+    if (rpcReq.fileName) desc.fileName = rpcReq.fileName;
+    if (rpcReq.targetFileName) desc.targetFileName = rpcReq.targetFileName;
+  }
+
+  return desc;
+}
+
 export async function rpcFault(
   sessionContext: SessionContext,
   id: string,
@@ -3119,7 +3172,14 @@ export async function rpcFault(
   const fault: Fault = {
     code: `cwmp.${faultResponse.detail.faultCode}`,
     message: faultResponse.detail.faultString,
-    detail: faultResponse.detail,
+    // Fault records show the request unmasked (deliberate exception to the
+    // no-secrets rule); the "CPE fault" access-log line masks secrets.
+    detail: rpcReq
+      ? {
+          ...faultResponse.detail,
+          acsRequest: describeAcsRequest(rpcReq, false),
+        }
+      : faultResponse.detail,
   };
 
   return fault;

@@ -269,6 +269,8 @@ export interface FaultStruct {
   faultCode: string;
   faultString: string;
   setParameterValuesFault?: SpvFault[];
+  // Summary of the failed ACS request (session.describeAcsRequest)
+  acsRequest?: Record<string, unknown>;
 }
 
 export interface CpeFault {

@@ -109,6 +109,19 @@ not a replacement for code inspection.
    (`refreshed`), up to 50 each. Paths only, never values. A path present in
    every cycle is the likely cause.
 
+7. **CPE faults include the failed request** (`lib/session.ts`,
+   `lib/cwmp.ts`, `lib/types.ts`). Many CPEs return e.g. fault 9003
+   ("Invalid arguments") with an empty `SetParameterValuesFault`, and
+   `rpcFault` used to drop the request. `describeAcsRequest` now summarises it: SetParameterValues
+   name/value/type per parameter, other RPCs their parameter or object names,
+   Download only file type/name (never URL or credentials); at most 100 entries,
+   values cut at 200 characters. The summary is stored as `detail.acsRequest`
+   in the fault record **unmasked** (a deliberate exception agreed by Johan:
+   Wi-Fi keys and passwords from a failed SetParameterValues are visible to
+   anyone who can read faults in the UI/NBI) and added as JSON to the existing
+   `CPE fault` access-log line with values of secret-looking parameter names
+   (`pass|secret|key|psk|token|credential`) masked as `***`.
+
 ## Completed changes
 
 `cwmp-updates` holds one commit per independent change on top of the
@@ -125,6 +138,7 @@ not a replacement for code inspection.
 | `feat(cwmp): limit invalid DeviceId reset to configured hours`            | `cwmp.invalidDeviceIdResetWindow`: "reset" only inside daily windows, "log" outside.                        |
 | `fix(cwmp): rebind sessions whose config snapshot was evicted`            | Workers no longer crash on an evicted config snapshot; the session continues on the current one.            |
 | `feat(cwmp): log changed paths when presets loop`                         | Paths changed per preset cycle are logged when `preset_loop` fires (paths only, no values).                 |
+| `feat(cwmp): include the failed ACS request in CPE faults`                | Faults show the failed request (`detail.acsRequest`); the access log masks secret values.                   |
 
 The user confirmed that building and access logging work in production. No
 logging implementation task remains outstanding.
