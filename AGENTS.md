@@ -44,7 +44,7 @@ npx prettier --check <changed files>
 |---|---|---|
 | Inject GPN objects the device never reports (e.g. `AssociatedDevice.` on Calix-family ONTs) and probe them with object-level GPV | `cwmp.forceAddManufacturers` **and** `cwmp.forceAddObjects` (both required; `*` = existing numeric instance; no defaults) | `session.ts`: `getForceAddConfig`, `getForcedObjectPatterns`, `matchesForceAddManufacturer`, `forcedObjectProbePaths`, `ForcedObjectProbe` |
 | Force recursive GPN (`NextLevel=false`) for matching paths | `cwmp.forceNextLevelFalse` (nothing forced if unset) | `session.ts`: `forceRecursiveGpn` in GPN scheduler |
-| Malformed Inform DeviceId handling | `cwmp.invalidDeviceIdRecovery` = `disabled` (default) / `log` / `reset` | `cwmp.ts`, `soap.ts` |
+| Malformed Inform DeviceId handling | `cwmp.invalidDeviceIdRecovery` = `disabled` (default) / `log` / `reset`; optional `cwmp.invalidDeviceIdResetWindow` (e.g. `03:00-05:00, 23:00-01:00`, server local time) limits `reset` to those hours and uses `log` outside them (unset = reset any time) | `cwmp.ts`: `getInvalidDeviceIdRecoveryMode`; `soap.ts` |
 | Non-blocking NBI connection request: `POST /devices/{id}/tasks?connection_request&async` (with a task body or empty) replies 202 at once and sends the connection request in the background instead of waiting for the session | Query flag `async` (opt-in; without it the NBI waits as before) | `nbi.ts`: `sendConnectionRequestInBackground`, `asyncConReq` |
 
 ### Logging (all via the **access logger**, `logger.accessInfo/accessWarn` with `sessionContext`)

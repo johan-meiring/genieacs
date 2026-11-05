@@ -62,6 +62,16 @@ not a replacement for code inspection.
    for ACS-initiated connection requests, not Inform auth. Recover source IP
    from trusted forwarded headers; avoid trusting arbitrary client-supplied
    headers. Treat reset as destructive; test log mode first.
+   - Admin → Config `cwmp.invalidDeviceIdResetWindow` optionally limits
+     `"reset"` to daily hours in the server's local time, e.g. `"03:00-05:00"`.
+     Several comma-separated windows and windows crossing midnight
+     (`"23:00-02:00"`) are allowed; the start is inclusive and the end
+     exclusive. Outside every window, or if the value is invalid, the Inform is
+     handled as `"log"` and the incomplete-DeviceId warning adds
+     `configuredMode: "reset"` and `resetWindow`. Unset means reset at any time.
+     The window is checked when the Inform arrives; a recovery that has started
+     still sends its `FactoryReset` if the window closes meanwhile. All of this
+     is in `getInvalidDeviceIdRecoveryMode` (`applyResetWindow` parameter).
 
 4. **Non-blocking NBI connection request** (`lib/nbi.ts`).
    `POST /devices/{id}/tasks?connection_request` normally waits for the CWMP
@@ -87,6 +97,7 @@ not a replacement for code inspection.
 | `feat(cwmp): inject configured missing GPN objects with access logging`   | `cwmp.forceAddManufacturers`/`cwmp.forceAddObjects`, the GPV probe and the `Forced GPN object added` event. |
 | `feat(cwmp): configurable handling of incomplete Inform DeviceId`         | `cwmp.invalidDeviceIdRecovery` (`disabled`/`log`/`reset`) and its access-log events.                        |
 | `feat(nbi): add async option for connection_request task calls`           | `?connection_request&async` replies 202 at once; the connection request is sent in the background.          |
+| `feat(cwmp): limit invalid DeviceId reset to configured hours`            | `cwmp.invalidDeviceIdResetWindow`: "reset" only inside daily windows, "log" outside.                        |
 
 The user confirmed that building and access logging work in production. No
 logging implementation task remains outstanding.

@@ -62,27 +62,69 @@ const MAX_CONCURRENT_REQUESTS = +config.get("MAX_CONCURRENT_REQUESTS");
 // DeviceId is incomplete and no normal device session can be created.
 // No configured value (or an invalid value) means disabled. The environment
 // variable GENIEACS_INVALID_DEVICEID_RECOVERY is no longer consulted.
-async function getInvalidDeviceIdRecoveryMode(): Promise<
-  "disabled" | "log" | "reset"
-> {
+//
+// With applyResetWindow, "reset" is limited to the daily windows in
+// cwmp.invalidDeviceIdResetWindow (server local time, comma-separated
+// "HH:MM-HH:MM" ranges, start inclusive, end exclusive; a range may cross
+// midnight). Outside them, or if that setting is invalid, "log" is used and
+// resetWindow reports the configured value. No window means reset at any time.
+async function getInvalidDeviceIdRecoveryMode(
+  applyResetWindow: boolean,
+): Promise<{ mode: "disabled" | "log" | "reset"; resetWindow?: string }> {
   const snapshot = await localCache.getRevision();
+  const now = Date.now();
   const configured = localCache.getConfig(
     snapshot,
     "cwmp.invalidDeviceIdRecovery",
     {},
-    Date.now(),
+    now,
   );
-  if (configured == null || configured === "") return "disabled";
+  if (configured == null || configured === "") return { mode: "disabled" };
   const mode = typeof configured === "string"
     ? configured.trim().toLowerCase()
     : "";
-  if (mode === "disabled" || mode === "log" || mode === "reset")
-    return mode;
-  logger.warn({
-    message: "Invalid cwmp.invalidDeviceIdRecovery setting; using disabled",
-    valueType: typeof configured,
-  });
-  return "disabled";
+  if (mode !== "disabled" && mode !== "log" && mode !== "reset") {
+    logger.warn({
+      message: "Invalid cwmp.invalidDeviceIdRecovery setting; using disabled",
+      valueType: typeof configured,
+    });
+    return { mode: "disabled" };
+  }
+  if (mode !== "reset" || !applyResetWindow) return { mode };
+
+  const windowSetting = localCache.getConfig(
+    snapshot,
+    "cwmp.invalidDeviceIdResetWindow",
+    {},
+    now,
+  );
+  const resetWindow = typeof windowSetting === "string"
+    ? windowSetting.trim()
+    : windowSetting == null ? "" : String(windowSetting);
+  if (!resetWindow) return { mode };
+
+  const date = new Date(now);
+  const minute = date.getHours() * 60 + date.getMinutes();
+  let insideWindow = false;
+  for (const range of resetWindow.split(",")) {
+    const m = /^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/.exec(range);
+    if (
+      typeof windowSetting !== "string" ||
+      !m || +m[1] > 23 || +m[2] > 59 || +m[3] > 23 || +m[4] > 59
+    ) {
+      logger.warn({
+        message: "Invalid cwmp.invalidDeviceIdResetWindow setting; using log",
+        valueType: typeof windowSetting,
+      });
+      return { mode: "log", resetWindow };
+    }
+    const start = +m[1] * 60 + +m[2];
+    const end = +m[3] * 60 + +m[4];
+    if (start <= end
+      ? minute >= start && minute < end
+      : minute >= start || minute < end) insideWindow = true;
+  }
+  return insideWindow ? { mode } : { mode: "log", resetWindow };
 }
 
 const INVALID_DEVICEID_PREFIX = "invalidid-";
@@ -1704,11 +1746,16 @@ async function listenerAsync(
 
   // Re-evaluate the GUI recovery mode at the start of each relevant request.
   // This works even if Manufacturer/OUI/ProductClass/SerialNumber are missing.
-  const invalidDeviceIdRecovery =
+  // Only a new Inform is limited to the reset window; a recovery already in
+  // progress may finish after the window closes.
+  const invalidDeviceIdRecoveryState =
     sessionId?.startsWith(INVALID_DEVICEID_PREFIX) ||
     rpc.cpeRequest?.name === "Inform"
-      ? await getInvalidDeviceIdRecoveryMode()
-      : "disabled";
+      ? await getInvalidDeviceIdRecoveryMode(
+          !sessionId?.startsWith(INVALID_DEVICEID_PREFIX),
+        )
+      : { mode: "disabled" as const, resetWindow: undefined };
+  const invalidDeviceIdRecovery = invalidDeviceIdRecoveryState.mode;
 
   // Intercept recovery sessions before the normal device-id/database flow.
   if (sessionId?.startsWith(INVALID_DEVICEID_PREFIX)) {
@@ -1728,6 +1775,10 @@ async function listenerAsync(
       logger.accessWarn({
         message: "CWMP Inform has incomplete DeviceId",
         recoveryMode: invalidDeviceIdRecovery,
+        ...(invalidDeviceIdRecoveryState.resetWindow != null && {
+          configuredMode: "reset",
+          resetWindow: invalidDeviceIdRecoveryState.resetWindow,
+        }),
         ...invalidDeviceIdLogFields(httpRequest, deviceIdInfo, missingFields),
       });
     }
