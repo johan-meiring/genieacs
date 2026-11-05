@@ -286,6 +286,10 @@ export async function getRevision(): Promise<string> {
   return await localCache.getRevision();
 }
 
+export function hasRevision(revision: string): boolean {
+  return localCache.hasRevision(revision);
+}
+
 export function getPresets(revision: string): Preset[] {
   return localCache.get(revision).presets;
 }

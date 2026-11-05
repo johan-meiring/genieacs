@@ -822,7 +822,25 @@ async function nextRpc(sessionContext: SessionContext): Promise<void> {
   return nextRpc(sessionContext);
 }
 
+// Config snapshots are per worker and evicted 120 s after a config change.
+// A session that outlives that, or moves to a worker that never loaded its
+// snapshot, would otherwise crash the worker; continue with the current one.
+async function ensureCacheSnapshot(
+  sessionContext: SessionContext,
+): Promise<void> {
+  if (localCache.hasRevision(sessionContext.cacheSnapshot)) return;
+  const previousRevision = sessionContext.cacheSnapshot;
+  sessionContext.cacheSnapshot = await localCache.getRevision();
+  logger.accessWarn({
+    sessionContext: sessionContext,
+    message: "Session config snapshot expired; using current revision",
+    previousRevision: previousRevision,
+    currentRevision: sessionContext.cacheSnapshot,
+  });
+}
+
 async function endSession(sessionContext: SessionContext): Promise<void> {
+  await ensureCacheSnapshot(sessionContext);
   if (sessionContext.provisions.length) {
     const fault = {
       code: "session_terminated",
@@ -1088,6 +1106,8 @@ async function processRequest(
   parseWarnings: Record<string, unknown>[],
   body: string,
 ): Promise<void> {
+  await ensureCacheSnapshot(sessionContext);
+
   for (const w of parseWarnings) {
     w.sessionContext = sessionContext;
     logger.accessWarn(w);

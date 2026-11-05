@@ -84,6 +84,19 @@ not a replacement for code inspection.
    `Background connection request failed` (WARN, with `status`). Without
    `async` the endpoint behaves exactly as upstream.
 
+5. **Evicted config snapshot no longer crashes CWMP workers** (`lib/cwmp.ts`,
+   `lib/cwmp/local-cache.ts`). Upstream bug: each worker keeps configuration
+   snapshots in memory and drops the old one 120 s after a config change
+   (`EVICT_TIMEOUT` in `lib/local-cache.ts`). A session that outlived that, or
+   moved through the cache to a worker that never loaded its snapshot (e.g. one
+   restarted after a crash), threw `Cache snapshot does not exist` and killed
+   the worker, which caused cascades of `Worker died`. `ensureCacheSnapshot`
+   now runs at the start of `processRequest` and `endSession`: if the session's
+   snapshot is missing it switches to the current revision and logs
+   `Session config snapshot expired; using current revision` (WARN, with
+   `previousRevision` and `currentRevision`). The rest of that session uses the
+   new configuration.
+
 ## Completed changes
 
 `cwmp-updates` holds one commit per independent change on top of the
@@ -98,6 +111,7 @@ not a replacement for code inspection.
 | `feat(cwmp): configurable handling of incomplete Inform DeviceId`         | `cwmp.invalidDeviceIdRecovery` (`disabled`/`log`/`reset`) and its access-log events.                        |
 | `feat(nbi): add async option for connection_request task calls`           | `?connection_request&async` replies 202 at once; the connection request is sent in the background.          |
 | `feat(cwmp): limit invalid DeviceId reset to configured hours`            | `cwmp.invalidDeviceIdResetWindow`: "reset" only inside daily windows, "log" outside.                        |
+| `fix(cwmp): rebind sessions whose config snapshot was evicted`            | Workers no longer crash on an evicted config snapshot; the session continues on the current one.            |
 
 The user confirmed that building and access logging work in production. No
 logging implementation task remains outstanding.
