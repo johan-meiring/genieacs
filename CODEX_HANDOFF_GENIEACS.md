@@ -97,6 +97,18 @@ not a replacement for code inspection.
    `previousRevision` and `currentRevision`). The rest of that session uses the
    new configuration.
 
+6. **Diagnostics for `preset_loop`** (`lib/cwmp.ts`, `lib/versioned-map.ts`,
+   `lib/types.ts`). GenieACS re-runs the presets while a pass changes device
+   data (the `dirty` counters of `deviceData.timestamps`/`attributes`) and
+   raises `preset_loop` after more than `MAX_CYCLES` (4) passes, but only
+   counts the changes. `VersionedMap.changes` (off unless set) now records the
+   keys behind those counters; `trackPresetCycleChanges` keeps the paths per
+   cycle in `sessionContext.presetCycleChanges` (last 5 cycles). When the fault
+   fires, one `Preset loop diagnostics` WARN line per cycle lists the channels
+   and the paths whose values changed (`changedValues`) or were refreshed
+   (`refreshed`), up to 50 each. Paths only, never values. A path present in
+   every cycle is the likely cause.
+
 ## Completed changes
 
 `cwmp-updates` holds one commit per independent change on top of the
@@ -112,6 +124,7 @@ not a replacement for code inspection.
 | `feat(nbi): add async option for connection_request task calls`           | `?connection_request&async` replies 202 at once; the connection request is sent in the background.          |
 | `feat(cwmp): limit invalid DeviceId reset to configured hours`            | `cwmp.invalidDeviceIdResetWindow`: "reset" only inside daily windows, "log" outside.                        |
 | `fix(cwmp): rebind sessions whose config snapshot was evicted`            | Workers no longer crash on an evicted config snapshot; the session continues on the current one.            |
+| `feat(cwmp): log changed paths when presets loop`                         | Paths changed per preset cycle are logged when `preset_loop` fires (paths only, no values).                 |
 
 The user confirmed that building and access logging work in production. No
 logging implementation task remains outstanding.

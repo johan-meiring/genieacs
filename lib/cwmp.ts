@@ -467,6 +467,28 @@ function appendProvisions(original, toAppend): boolean {
   return modified;
 }
 
+const MAX_LOGGED_PATHS = 50;
+
+// preset_loop diagnostics: close the current cycle's change sets (paths only,
+// no values) and keep the last MAX_CYCLES + 1 cycles on the session.
+function trackPresetCycleChanges(sessionContext: SessionContext): void {
+  const { timestamps, attributes } = sessionContext.deviceData;
+  if (timestamps.changes || attributes.changes) {
+    const list = (s: Set<Path> | null): string[] =>
+      s ? Array.from(s, (p) => p.toString()).sort() : [];
+    if (!sessionContext.presetCycleChanges)
+      sessionContext.presetCycleChanges = [];
+    const history = sessionContext.presetCycleChanges;
+    history.push({
+      values: list(attributes.changes),
+      refreshed: list(timestamps.changes),
+    });
+    if (history.length > MAX_CYCLES + 1) history.shift();
+  }
+  timestamps.changes = new Set();
+  attributes.changes = new Set();
+}
+
 async function applyPresets(sessionContext: SessionContext): Promise<void> {
   const deviceData = sessionContext.deviceData;
   const presets = localCache.getPresets(sessionContext.cacheSnapshot);
@@ -634,6 +656,21 @@ async function applyPresets(sessionContext: SessionContext): Promise<void> {
     sessionContext.presetCycles = (sessionContext.presetCycles || 0) + 1;
 
   if (sessionContext.presetCycles > MAX_CYCLES) {
+    trackPresetCycleChanges(sessionContext);
+    const history = sessionContext.presetCycleChanges || [];
+    history.forEach((c, i) => {
+      logger.accessWarn({
+        sessionContext: sessionContext,
+        message: "Preset loop diagnostics",
+        cycle: i + 1 - history.length, // 0 = last cycle before the fault
+        channels: Object.keys(sessionContext.channels).join(","),
+        changedValueCount: c.values.length,
+        changedValues: c.values.slice(0, MAX_LOGGED_PATHS).join(","),
+        refreshedCount: c.refreshed.length,
+        refreshed: c.refreshed.slice(0, MAX_LOGGED_PATHS).join(","),
+      });
+    });
+
     const fault = {
       code: "preset_loop",
       message: "The presets are stuck in an endless configuration loop",
@@ -646,6 +683,7 @@ async function applyPresets(sessionContext: SessionContext): Promise<void> {
     return sendAcsRequest(sessionContext);
   }
 
+  trackPresetCycleChanges(sessionContext);
   deviceData.timestamps.dirty = 0;
   deviceData.attributes.dirty = 0;
   const {

@@ -47,6 +47,7 @@ npx prettier --check <changed files>
 | Malformed Inform DeviceId handling | `cwmp.invalidDeviceIdRecovery` = `disabled` (default) / `log` / `reset`; optional `cwmp.invalidDeviceIdResetWindow` (e.g. `03:00-05:00, 23:00-01:00`, server local time) limits `reset` to those hours and uses `log` outside them (unset = reset any time) | `cwmp.ts`: `getInvalidDeviceIdRecoveryMode`; `soap.ts` |
 | Non-blocking NBI connection request: `POST /devices/{id}/tasks?connection_request&async` (with a task body or empty) replies 202 at once and sends the connection request in the background instead of waiting for the session | Query flag `async` (opt-in; without it the NBI waits as before) | `nbi.ts`: `sendConnectionRequestInBackground`, `asyncConReq` |
 | Bug fix: a session whose config snapshot was evicted (session outlived a config change by > 120 s, or moved to a worker that never loaded it) is rebound to the current snapshot instead of crashing the worker with `Cache snapshot does not exist` | — | `cwmp.ts`: `ensureCacheSnapshot` (start of `processRequest` and `endSession`); `cwmp/local-cache.ts`: `hasRevision` |
+| Diagnostics for `preset_loop` ("The presets are stuck in an endless configuration loop"): the parameter paths whose values changed or were refreshed in each of the last preset cycles are logged when the fault fires (paths only, no values) | — | `versioned-map.ts`: `changes`; `cwmp.ts`: `trackPresetCycleChanges` in `applyPresets`; `types.ts`: `presetCycleChanges` |
 
 ### Logging (all via the **access logger**, `logger.accessInfo/accessWarn` with `sessionContext`)
 
@@ -56,6 +57,7 @@ npx prettier --check <changed files>
 | Object actually injected | `Forced GPN object added` (+ `objectPath`, `parameterPath`) | INFO |
 | Incomplete DeviceId (`log`/`reset` modes) | `CWMP Inform has incomplete DeviceId` | WARN |
 | Session rebound after its config snapshot was evicted (+ `previousRevision`, `currentRevision`) | `Session config snapshot expired; using current revision` | WARN |
+| `preset_loop` raised, one line per recent cycle (`cycle` 0 = last; `channels`, `changedValueCount`, `changedValues`, `refreshedCount`, `refreshed`; max 50 paths each) | `Preset loop diagnostics` | WARN |
 | NBI `async` connection request succeeded (NBI access log, `deviceId`) | `Background connection request sent` | INFO |
 | NBI `async` connection request failed (NBI access log, `deviceId`, `status`) | `Background connection request failed` | WARN |
 

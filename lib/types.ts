@@ -135,6 +135,8 @@ export interface SessionContext {
   httpRequest?: IncomingMessage;
   faultsTouched?: { [channel: string]: boolean };
   presetCycles?: number;
+  // Paths changed per preset cycle, kept for preset_loop diagnostics
+  presetCycleChanges?: { values: string[]; refreshed: string[] }[];
   new?: boolean;
   debug?: boolean;
   state: number;

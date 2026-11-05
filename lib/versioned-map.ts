@@ -11,12 +11,16 @@ export default class VersionedMap<K, V> {
   declare private _revision: number;
   declare private map: Map<K, (V | symbol)[]>;
   declare public dirty: number;
+  // Optional diagnostics: keys mutated at revision >= 1 (the same mutations
+  // that make `dirty > 1`). Null unless a caller turns tracking on.
+  declare public changes: Set<K> | null;
 
   public constructor() {
     this._sizeDiff = [0];
     this._revision = 0;
     this.map = new Map();
     this.dirty = 0;
+    this.changes = null;
   }
 
   public get size(): number {
@@ -56,6 +60,7 @@ export default class VersionedMap<K, V> {
     let revisions = this.map.get(key);
     if (!revisions) {
       this.dirty |= 1 << rev;
+      if (this.changes && rev > 0) this.changes.add(key);
       for (let i = 0; i < rev; ++i) this._sizeDiff[i] -= 1;
 
       revisions = [];
@@ -71,6 +76,7 @@ export default class VersionedMap<K, V> {
     const old = revisions[revisions.length - 1];
 
     this.dirty |= 1 << rev;
+    if (this.changes && rev > 0) this.changes.add(key);
     if (old === NONEXISTENT) ++this._sizeDiff[rev];
 
     for (let i = revisions.length; i < rev; ++i) revisions[i] = old;
@@ -90,6 +96,7 @@ export default class VersionedMap<K, V> {
     if (old === NONEXISTENT) return false;
 
     this.dirty |= 1 << rev;
+    if (this.changes && rev > 0) this.changes.add(key);
     --this._sizeDiff[rev];
 
     for (let i = revisions.length; i < rev; ++i) revisions[i] = old;
